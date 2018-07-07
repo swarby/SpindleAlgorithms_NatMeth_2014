@@ -1,0 +1,317 @@
+function detection = a4MartinSpindleDetection_v2(...
+    C3_N234, C3, fs, sleepStages)
+% MARTIN_SPINDLE_DETECTION Detect sleep spindles using the Martin algorithm.
+% N. Martin et al. "Topography of age-related changes in sleep spindles",
+% Neurobio Aging 34(2), 2013, pp 468-476
+% First input is a structure containing EEG from C3-M2 during all NREM
+% (S2+S3+S4) episodes, each cell in the structure is a continuous NREM
+% segment [muV].
+% Third input is EEG from C3-M2 from the entire night [muV].
+% Last input is the sampling frequency [Hz].
+% Syntax: detection = martin_spindle_detection(C3_N234,C3,fs)
+%
+% Implemented by M.Sc. Sabrina Lyngbye Wendt, July 2013
+% Modified by Stephan Grimault June 2015
+%   -added the variable perctileIN and got perctile_temp function
+% Modified by Karine Lacourse July 2015
+%   -Removed the minimum/maximum_duration function from the file
+% Modified by Julien Beaudry June 2017
+%   - Rewrote the main function but kept olds ones for archives
+
+resolution = 0.25 * fs; % Adapted with the sampling rate (resolution is 0.25 s)
+perctileIN = 95;
+
+detection = MontrealDetector(C3, sleepStages, fs, resolution, perctileIN);
+
+% This is how the Detector was called in the previous version
+% threshold = threshold_montreal(C3_N234,fs,resolution,perctileIN);
+% detection = montreal(C3,fs,threshold,resolution);
+%% Adjust spindle detections
+[begins, ends] = find_spindles(detection);
+[detection,begins,ends] = maximum_duration(detection,begins,ends,3,fs);
+[detection,begins,ends] = minimum_duration(detection,begins,ends,0.3,fs);
+
+
+%% Functions
+% This is the new way to compute the threshold. The RMS values are computed
+% on the whole time-series and a vector of stage sleep will allow the
+% threshold to be computed only on NREM values.
+    function detection = MontrealDetector(C3, sleepStages, fs, resolution, perctileIN)
+%   ComputeThreshold computes the threshold based on the percentile of
+%   the RMS values of the NREM signal
+%   Input:  C3: Vector containing the unfiltered signal 
+%           sleepStages: Vector of sleep stage detection for the full time
+%           series
+%           fs: sampling frequency
+%           resolution: Number of samples in each segment
+%           perctileIN: Percentile used for thresholding
+
+%       initialize the detector vector
+        t_total = length(C3);
+        detection = zeros(t_total,1);
+        
+%       Bandpass filter EEG between 11 and 15 Hz
+        C3_band = bandpass_filter_montreal(C3,fs); 
+        
+%       t is the vector containing the onset of each segment
+        t = 1:resolution:t_total;
+        nbSegments = length(t);
+        
+%       Compute the RMS value of each segment and record the stage in which
+%       it occurs
+        for iterSegment = 1:nbSegments-1
+            segmentStart = (iterSegment-1)*resolution+1;
+            segmentStop = segmentStart + resolution -1;
+            currSegment = C3_band(segmentStart:segmentStop);
+            vecRMS(iterSegment) = sqrt(mean(currSegment.^2));
+            vecStages(iterSegment) = sleepStages(segmentStart);
+            vecRMSSegment(segmentStart:segmentStop) = ones(1,resolution) .* vecRMS(iterSegment);
+        end
+        
+%       Handle the last segment depending on its length. If it is at least
+%       half as long as other segments, treat it like the others. If it is
+%       too short, duplicate the last value.
+        iterSegment = iterSegment+1;
+        segmentStart = (iterSegment-1)*resolution+1;
+        currSegment = C3_band(segmentStart:end);
+        if length(currSegment) >  round(resolution/2)
+            vecRMS(iterSegment) = sqrt(mean(currSegment.^2));
+            vecStages(iterSegment) = sleepStages(segmentStart);
+            vecRMSSegment(segmentStart:segmentStart + length(currSegment)-1) = ones(1,length(currSegment)) .* vecRMS(iterSegment);
+        else
+            vecRMS(iterSegment) = vecRMS(end);
+            vecStages(iterSegment) = sleepStages(segmentStart);
+            vecRMSSegment(segmentStart:segmentStart + length(currSegment)-1) = ones(1,length(currSegment)) .* vecRMS(iterSegment);
+        end
+        
+%       Extract the segments of NREM234 only
+        idNREM2 = vecStages == 2;
+        idNREM3 = vecStages == 3;
+        idNREM4 = vecStages == 4;
+        idNREM234 = idNREM2|idNREM3|idNREM4;
+        nbNREM = sum(idNREM234);
+        
+%       Find the RMS values of those NREM segments
+        vecRMS_NREM = vecRMS(idNREM234);
+        
+%       Sort them and the threshold is on the 95th percentile
+        vecRMS_NREM_sort = sort(vecRMS_NREM);
+        posThreshold = ceil(perctileIN/100*nbNREM)+1;
+        threshold = vecRMS_NREM_sort(posThreshold);
+
+%       the samples detected are those part of segments with an RMS value above the threshold
+%       Note that the detection is made on the whole signal, not just NREM.
+        idDetection = vecRMSSegment > threshold;
+        detection(idDetection) = 1;
+        
+%         detection = detection';
+        
+    end
+
+% This function is the original method to compute the threshold.
+    function threshold = threshold_montreal(C3nrem234,fs,resolution,perctileIN)   
+        % THRESHOLD_MONTREAL Calculates the amplitude criterion for spindle detection
+        % using the montreal method.
+        % Input is a structure where each entry contains a continuous segment of
+        % EEG data recorded at C3-M2 during S2+S3+S4. The sampling frequency is the
+        % final input.
+        
+        percentile = perctileIN; %95;
+        window_length = 0.25*fs;
+%         window_length = 0.1*fs;
+        
+        Ltotal = 0;
+        for k = 1:length(C3nrem234)
+            signal = C3nrem234{k}; 
+            t_total = length(signal);
+            if t_total < 3*1023+1
+                samples2zeropad = 3*1023+1-t_total;
+                first = round(samples2zeropad/2);
+                second = samples2zeropad-first;
+                signal = [zeros(first,1); signal; zeros(second,1)];
+            else
+                first = 0;
+                second = 0;
+            end
+            signal_band = bandpass_filter_montreal(signal,fs);
+            signal_band = signal_band(first+1:end-second);
+            
+%           ìnsert here the filtered signal of the C detector. No longer
+%           Used but proves that the filter is the only remaining source of
+%           difference between this implementation and the C detector
+%             tmp = load('/media/DATADRIVE/smartSVN_root/sandbox/julien/Validate Martin Detector/filteredSignal-16min-C2-20170406.mat');
+%             signal_band = tmp.Filtr;
+            
+%           Sabrina's line of code. It is unclear why she decided to put the time stamps on the
+%           center of the windows 
+%             t = 1+floor(window_length/2):resolution:t_total-floor(window_length/2);
+            t = 1:resolution:t_total;
+            
+            a1 = signal_band.^2./(window_length);
+            L = length(t); RMS_part = zeros(L,1);
+            for i = 1:L-1
+%                 This is Sabrina's code, matching how she split the
+%                 windows "t"
+%                 RMS_part(i,1) = sqrt(sum( a1(t(i)-floor(window_length/2):t(i)+floor(window_length/2)) ));
+                RMS_part(i) = sqrt(sum( a1( t(i):t(i)+window_length-1 )));
+            end
+            
+%             RMS of the last window. If the number of sample remaining is
+%             at least half a window, compute the RMS anyway. Otherwise,
+%             dupicate the last RMS value.
+            if length(a1( t(L):end )) >  round(window_length/2)
+                RMS_part(i+1) = sqrt(sum( a1( t(L):end )));
+            else
+                RMS_part(i+1) = RMS_part(i);
+            end
+            
+            RMS(Ltotal+1:Ltotal+L) = RMS_part(:);
+            Ltotal = Ltotal+L;
+        end
+%         The original way to compute the threshhold. Doesn't work too well and is needlessly complicated     
+%         threshold = prctile(RMS,percentile); original 
+%         threshold = perctile_temp(RMS,percentile);
+
+%       This method is simpler and probably faster, just sort the RMS and take the position of
+%       the 95th percentile. The RMS at that position is the threshold.
+        RMSsort = sort(RMS);
+        posThreshold = ceil(percentile/100*Ltotal)+1;
+        threshold = RMSsort(posThreshold);
+        
+%       Rounding-up the threshold to the nearest second decimal
+%         threshold = ceil(threshold*100)/100;
+
+    end
+
+    function out = bandpass_filter_montreal(in,Fs)
+        % BANDPASS_FILTER_MONTREAL Bandpass filter used in Martin spindle
+        % detection.
+        % This function creates a 1023rd order (if the sampling frequency is 100 Hz)
+        % Rectangular bandpass filter with passband between 11.5 and 14.5 Hz. The
+        % filter is -3 dB at 11.1 and 14.9 Hz.
+        % The input signal is filtered with the created filter and the filtered
+        % signal is returned as output.
+        
+        N    = 256;     % Order
+
+        Fc1  = 11.08;    % First Cutoff Frequency
+        Fc2  = 14.92;    % Second Cutoff Frequency
+        flag = 'scale';  % Sampling Flag
+        % Create the window vector for the design algorithm.
+        win = rectwin(N+1);
+        % Calculate the coefficients using the FIR1 function.
+        b  = fir1(N, [Fc1 Fc2]/(Fs/2), 'bandpass', win, flag);
+        out = filtfilt(b,1,in);
+    end
+
+    function detection = montreal(C3,fs,threshold,resolution)
+        % MONTREAL Detect sleep spindles in EEG given the amplitude criteria.
+        % Input is the EEG signal we wish to detect spindles in, the sampling
+        % frequency and the amplitude criteria.
+        % Output is a vector containing the detection of spindles.
+        
+        %% Bandpass filter EEG between 11 and 15 Hz
+        C3_band = bandpass_filter_montreal(C3,fs);
+        
+        %% Calculate the RMS of the filtered signal with a time window of 0.25 sec
+%       The window length is no longer hard-coded at 100 Hz, now depends
+%       only on the Fs
+        window_length = 0.25*fs;
+%         window_length = 0.1*fs;
+
+        t_total = length(C3);
+%         Again Sabrina's original script, changed to removed the offset of
+%         1/2 window
+%         t = 1+floor(window_length/2):resolution:t_total-floor(window_length/2);
+        t = 1:resolution:t_total;
+        RMS = zeros(length(t),1);
+        
+        a1 = C3_band.^2./(window_length);
+        for i = 1:length(t)
+%             Changed to fit the new vector "t"
+%             RMS(i) = sqrt(sum( a1(t(i)-floor(window_length/2):t(i)+floor(window_length/2)) ));
+            RMS(i) = sqrt(sum( a1( t(i):t(i)+window_length-1 )));
+        end
+        
+        %% Thresholding the spindle RMS signal
+        det = zeros(size(RMS));
+        det(RMS>threshold) = 1;
+        
+        [begin_ones,end_ones] = find_spindles(det);
+% %       This simple line was necessary to avoid having all the detections
+% %       shortened by 1 window, and many of them dissapearing of not passing
+% %       the minimum duration criteria
+%         end_ones = end_ones+1;
+        
+%       With the new value on end_ones, the duration is now correct
+%         duration = (end_ones-begin_ones); % number of intervals, time with resolution of 0.25 s to get the actual duration
+%           Instead of increasing the values in ends, we will increase the
+%           duration. This is necessary to be compatible with other
+%           functions used by every detectors
+        duration = (end_ones-begin_ones)+1;
+        
+%         duration = end_ones-begin_ones; % number of intervals, time with resolution of 0.25 s to get the actual duration
+%         begin_ones = begin_ones(duration>=1); % if dur > 0.25 s (1 sample) detect spindle
+%         end_ones = end_ones(duration>=1);
+
+        % Extra code from Sabrina
+%         duration = end_ones-begin_ones+1; % number of intervals, time with resolution of 0.25 s to get the actual duration
+        begin_ones = begin_ones(duration>=1); % if dur > 0.25 s (1 sample) detect spindle
+        end_ones = end_ones(duration>=1);
+
+        begin_spindle = t(begin_ones);
+        
+%       In the unlikely scenario that the last window is a detection, limit
+%       the end of that detection to not exceed bounds. This is done to
+%       match the C detector
+        end_spindle = t(end_ones(1:end-1)+1);
+        if end_ones(end) == length(t)
+            end_spindle(end+1) = t(end_ones(end));
+        else
+            end_spindle(end+1) = t(end_ones(end)+1);
+        end
+        
+        detection = zeros(length(C3),1);
+        for j = 1:length(begin_spindle)
+            detection(begin_spindle(j):end_spindle(j)) = 1;
+        end
+        
+    end
+
+    function [begins, ends] = find_spindles(bv)
+        % FIND_SPINDLES - find start and end index' of spindles.
+        % Input is a binary vector bv containing ones where spindles are detected.
+        % Output is vectors containing the index' of spindle beginnings and ends
+        % (first sample of spindle and last sample of spindle, respectively).
+        
+        sise = size(bv);
+        E = bv(2:end)-bv(1:end-1); % Find start and end of intervals with spindles
+        
+        begins = find(E==1)+1;
+        if bv(1) == 1
+            if sise(1) > 1
+                begins = [1; begins-1];
+            elseif sise(2) > 1
+                begins = [1 begins-1];
+            else
+                error('The input signal is not one dimensional')
+            end
+        elseif numel(begins) == 0 && bv(1) == 0
+            begins = NaN;
+        end
+        
+        ends = find(E==-1);
+        if bv(end) == 1
+            if sise(1) > 1
+                ends = [ends; length(bv)];
+            elseif sise(2) > 1
+                ends = [ends length(bv)];
+            else
+                error('The input signal is not one dimensional')
+            end
+        elseif numel(ends) == 0 && bv(end) == 0
+            ends = NaN;
+        end
+    end
+
+end
