@@ -1,0 +1,259 @@
+function detection = a5_spindle_detection_v02(C3_N2, C3, fs, minDur, maxDur)
+% WAMSLEY Detect sleep spindles using the Wamsley algorithm.
+% E. Wamsley et al. "Reduced Sleep Spindles and Spindle Coherence in 
+% Schizophrenia: Mechanisms of Impaired Memory Consolidation", 
+% Biol Psychiatry 71, 2012, pp 154-161
+% 
+% Inputs
+%   C3_N2   : a structure containing EEG from C3-M2 during all NREM (S2) episodes,
+%       each cell in the structure is a continuous NREM segment [uV].
+%   C3      : EEG signal (C3-M2) from the entire night [uV].
+%   fs      : sampling frequency [Hz].
+%   minDur  : minimum duration of a spindle [s]
+%   maxDur  : maximum duration of a spindle [s]
+%
+% Output
+%   detection :  Vector (same length as C3) containing the detection, 
+%                   where 1 means a detection. 
+% 
+% Logs : 
+%     Adopted from Wamsley by M.Sc. Sabrina Lyngbye Wendt, July 2013
+%     Modified by Stephan Grimault June 2015
+%       -Modified the cwt for cwt_temp
+%     Modified by Karine Lacourse 2015
+%       -Removed the minimum/maximum_duration function from the file
+%     Modified by Karine Lacourse 2020-02-03
+%       -Moved all the parameters first, adapted for any fs, 
+%       modified the code to remove spindle too close from a previous one.
+%
+    %% Define parameters for the wavelet detector
+    
+    % Threshold value (detection = energy² > bsl_energy² x thresh_val)
+    thresh_val = 4.5; 
+    fc_scaled = 13.5; % Central freuquency of the scaled wavelet
+    fc = 0.5;  % Central frequency for the wavelet design
+    fb = 13.5; % Bandwidth parameter for the wavelet design
+    mvAvgWinSec = 0.1; % Moving average window in sec
+    % Delete the spindle if there is also a spindle within the second preceeding it
+    % the original code looked between 2 ends of events
+    minBwtEvt_sec = 1; 
+    
+    % scale corresponding to the wanted center frequency for sampling frequency fs
+    scale = centfrq(['cmor',num2str(fb),'-',num2str(fc)])/fc_scaled*fs;
+    
+    % Compute the signal mean on baseline (N2 only) for thresholding
+    signalmean = threshold_wamsley(C3_N2, fc, fb, scale, mvAvgWinSec);
+    % Detect spindles on C3 based on the energy from the baseline (N2)
+    detection = wamsley(C3, fs, signalmean, fc, fb, scale, mvAvgWinSec, ...
+        thresh_val, minBwtEvt_sec);
+
+    %% THRESHOLD_WAMSLEY Calculates the amplitude criteria for spindle detection
+    % using the wamsley method.
+    % Input 
+    %   C3nrem2 :   A structure where each entry contains a continuous segment 
+    %                   of EEG data recorded at C3-M2 during S2. 
+    %   fc :        Central frequency for the wavelet design
+    %   fb :        Bandwidth parameter for the wavelet design
+    %   scale :     Scale corresponding to the wanted fc for a specific fs
+    %   mvAvgWinSec : Moving average window lentgh is sec
+    % Output
+    %   signalmean : Average energy squared of the signal around fc in the baseline  
+    %
+    % Notes :
+    %   requirements : cwt_temp
+    %
+    function signalmean = threshold_wamsley(C3nrem2, fc, fb, scale, mvAvgWinSec)
+
+        Ltotal = 0;
+        % For each N2 segment
+        for k = 1:length(C3nrem2)
+            signal = C3nrem2{k}; 
+            L = length(signal);
+            % Perform wavelet transformation
+            EEGWave = cwt_temp(signal,scale,['cmor' num2str(fb) '-' num2str(fc)]);
+            % Extract the energy squared of the filtered complex values
+            % should be ... EEGData = abs(EEGWave).^2; but the parameters of the
+            % detector have to be modified to keep a similar behavior
+            EEGData = real(EEGWave.^2).^2;
+            % Create 100ms window to convolve with 
+            mv_window = ones(round(fs*mvAvgWinSec),1)/(round(fs*mvAvgWinSec)); 
+            % Low pass the signal with the moving average window
+            EEGData2 = filter(mv_window,1,EEGData); 
+            % Store the low-pass filtered signal (from the wavelet at fc)
+            MA(Ltotal+1:Ltotal+L) = EEGData2;
+            Ltotal = Ltotal+L;
+        end
+        % Determine amplitude threshold
+        % Average the energy² of every N2 segments
+        signalmean = mean(MA);
+    end
+
+    %% WAMSLEY Detect sleep spindles in EEG given the amplitude criteria.
+    % using the wamsley method.
+    % Input 
+    %   C3 :    EEG signal 
+    %   fs :    Sampling frequency
+    %   signalmean : Average energy squared of the signal around fc in the baseline  
+    %   fc :    Central frequency for the wavelet design
+    %   fb :    Bandwidth parameter for the wavelet design
+    %   scale : Scale corresponding to the wanted fc for a specific fs
+    %   mvAvgWinSec : Moving average window lentgh is sec
+    %   thresh_val : Threshold value (detection = energy² > bsl_energy² x thresh_val)
+    %   minBwtEvt_sec : Min time in sec between 2 events end, otherwise the
+    %       second event is deleted. 
+    % Output
+    %   detection :  Vector (same length as C3) containing the detection, 
+    %                   where 1 means a detection. 
+    % Notes :
+    %   requirements : cwt_temp, find_spindles, maximum_duration and 
+    %                   minimum_duration, eventSmpList2DetectVect
+    %
+    function detection = wamsley(C3, fs, signalmean, fc, fb, scale, ...
+            mvAvgWinSec, thresh_val, minBwtEvt_sec)
+
+        EEGWave = cwt_temp(C3,scale,['cmor' num2str(fb) '-' num2str(fc)]);
+        % Extract the energy squared of the filtered complex values
+        % should be ... EEGData = abs(EEGWave).^2; but the parameters of the
+        % detector have to be modified to keep a similar behavior
+        EEGData = real(EEGWave.^2).^2;        
+        % Create 100ms window to convolve with 
+        mv_window = ones(round(fs*mvAvgWinSec),1)/(round(fs*mvAvgWinSec)); 
+        % Low pass the signal with the moving average window
+        EEGData2 = filter(mv_window,1,EEGData); 
+            
+        % Determine amplitude threshold
+        threshold = signalmean.*thresh_val; % defines the threshold
+
+        % Find Peaks in the MS Signal
+        current_data=EEGData2;
+        
+        % Mark possible spindles
+        over=current_data>threshold; % Mark all points over threshold as '1'
+        detection = zeros(length(current_data),1);
+        detection(over) = 1;
+        % List of detection
+        [begins,ends] = find_spindles(detection);
+        % Remove too long and too short spindles
+        [detection, begins, ends] = maximum_duration(detection, begins, ends, ...
+            maxDur, fs);
+        [detection, begins, ends] = minimum_duration(detection, begins, ends, ...
+            minDur, fs);    
+        
+        % Delete the spindle if there is also a spindle within the second preceeding it
+        for evt_i = 2 : length(begins)-1
+            % should be step_bwt_evt = begins(evt_i)-ends(evt_i-1);
+            % but the original implementation is more similar to 
+            step_bwt_evt = ends(evt_i)-ends(evt_i-1);
+            if (step_bwt_evt <= round(minBwtEvt_sec*fs))
+                % If the event has to be removed 
+                % copy the preceeding event to keep the same event index
+                begins(evt_i) = begins(evt_i-1);
+                ends(evt_i) = ends(evt_i-1);
+            end
+        end
+        % Generate the detection vector based on the new set of events
+        % without too close events
+        detection = eventSmpList2DetectVect( [begins,ends], length(detection));
+        %[begins,ends] = find_spindles(detection);
+        
+    end
+
+    function [begins, ends] = find_spindles(bv)
+        % FIND_SPINDLES - find start and end index' of spindles.
+        % Input is a binary vector bv containing ones where spindles are detected.
+        % Output is vectors containing the index' of spindle beginnings and ends
+        % (first sample of spindle and last sample of spindle, respectively).
+        
+        sise = size(bv);
+        E = bv(2:end)-bv(1:end-1); % Find start and end of intervals with spindles
+        
+        begins = find(E==1)+1;
+        if bv(1) == 1
+            if sise(1) > 1
+                begins = [1; begins];
+            elseif sise(2) > 1
+                begins = [1 begins];
+            else
+                error('The input signal is not one dimensional')
+            end
+        elseif numel(begins) == 0 && bv(1) == 0
+            begins = NaN;
+        end
+        
+        ends = find(E==-1);
+        if bv(end) == 1
+            if sise(1) > 1
+                ends = [ends; length(bv)];
+            elseif sise(2) > 1
+                ends = [ends length(bv)];
+            else
+                error('The input signal is not one dimensional')
+            end
+        elseif numel(ends) == 0 && bv(end) == 0
+            ends = NaN;
+        end
+    end
+
+    function [bv,begins,ends] = maximum_duration(bv,begins,ends,max_dur,fs)
+        % MAXIMUM_DURATION - checks the sample duration of the spindles.
+        % Input is a vector containing ones in the interval where the spindle is
+        % and indexs describing the start and end of the spindle. The last two
+        % inputs are the maximum duration given in seconds and the sampling
+        % frequency given in Hz.
+        % Output is a vector containing ones in the interval where the spindle with
+        % duration shorter than or equal to the maximum duration is and indexs
+        % describing the start and end of the spindle.
+        
+        duration_samples = ends-begins+1;
+        for k = 1:length(begins)
+            if duration_samples(k) > max_dur*fs
+                bv(begins(k):ends(k)) = 0;
+                begins(k) = 0;
+                ends(k) = 0;
+            end
+        end
+        begins = begins(begins~=0);
+        ends = ends(ends~=0);
+    end
+
+    function [bv,begins,ends] = minimum_duration(bv,begins,ends,min_dur,fs)
+        % MINIMUM_DURATION - checks the sample duration of the spindles.
+        % Input is a vector containing ones in the interval where the spindle is
+        % and indexs describing the start and end of the spindle. The last two
+        % inputs are the minimum duration given in seconds and the sampling
+        % frequency given in Hz.
+        % Output is a vector containing ones in the interval where the spindle with
+        % duration longer than or equal to the minimum duration is and indexs
+        % describing the start and end of the spindle.
+        
+        duration_samples = ends-begins+1;
+        for k = 1:length(begins)
+            if duration_samples(k) < min_dur*fs
+                bv(begins(k):ends(k)) = 0;
+                begins(k) = 0;
+                ends(k) = 0;
+            end
+        end
+        begins = begins(begins~=0);
+        ends = ends(ends~=0);
+    end
+
+    function [ detectionVect ] = eventSmpList2DetectVect( NREMEventsLst, nSamples )
+    % Purpose: Generate a detection vector per sample from a list of events.
+    % Input 
+    %   NREMEventsLst : a matrix of event list [nEvents X 2]
+    %                   [start sample event 1, end sample event 1]
+    %                   [start sample event 2, end sample event 2]
+    %                   [                    ...                 ]
+    %   nSamples : number of samples in the detectionVect 
+    %               (usually from the number of samples in time series)
+    %
+    % Author: Karine Lacourse 2015-09-22
+    %
+        detectionVect = zeros(nSamples,1);
+        for iEvent = 1: size(NREMEventsLst,1)
+            detectionVect(NREMEventsLst(iEvent,1):NREMEventsLst(iEvent,2))=1;
+        end
+    end
+
+end
