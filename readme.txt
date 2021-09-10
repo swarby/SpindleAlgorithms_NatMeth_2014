@@ -19,6 +19,8 @@ Remove the .txt extension from the files to convert them to .m scripts needed fo
 
 ## Update 2018-07-07
 The code for two detectors (A3 and A4) has been updated to a3_spindle_detection_v02.m.txt and a4_spindle_detection_v02.m.txt.
+## Update 2021-08-16
+The code for the detector A5 has been updated to a5_spindle_detection_v02.m.txt.
 
 A3
 There was an error in the calculation of the background NREM signal that is used to establish the threshold.  The NREM background window was much shorter than required.  Performance of this detector (relative to the human consensus) has been improved due to this fix.
@@ -26,7 +28,10 @@ There was an error in the calculation of the background NREM signal that is used
 A4
 Small discrepencies between the original C implementation and this implemenation have been fixed.  The changes only have a small impact on the performance (relative to the human consensus) of this detector.
 
-The original implementations of both A3 and A4 can be found in the originalCode_2014.zip archive file.
+A5
+The design did not work properly with a sampling rate other than 100Hz.  The changes only have a small impact on the performance (relative to the human consensus) of this detector with a sampling frequency of 100 Hz, but have major impact on the performance with other sampling frequency.
+
+The original implementations of A3, A4 and A5 can be found in the originalCode_2014.zip archive file.
 
 ## For any questions or comments, please contact Simon Warby (simon.c.warby@umontreal.ca)
 
